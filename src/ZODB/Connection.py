@@ -46,6 +46,7 @@ from ZODB.POSException import InvalidObjectReference
 from ZODB.POSException import ReadConflictError
 from ZODB.POSException import ReadOnlyHistoryError
 from ZODB.POSException import Unsupported
+from ZODB.readonly import is_read_only
 from ZODB.serialize import ObjectReader
 from ZODB.serialize import ObjectWriter
 from ZODB.utils import oid_repr
@@ -204,6 +205,7 @@ class Connection(ExportImport):
         """Add a new object 'obj' to the database and assign it an oid."""
         if self.opened is None:
             raise ConnectionStateError("The database connection is closed")
+        self._check_read_only()
 
         marker = object()
         oid = getattr(obj, "_p_oid", marker)
@@ -829,12 +831,28 @@ class Connection(ExportImport):
         # savepoint, and the savepoint should not reflect the change
         # to the object.
 
+        if obj is not None:
+            self._check_read_only()
+
         if self._needs_to_join:
             self.transaction_manager.get().join(self)
             self._needs_to_join = False
 
         if obj is not None:
             self._registered_objects.append(obj)
+
+    def _check_read_only(self):
+        """Raise ReadOnlyError if the current transaction is read-only.
+
+        A transaction can be put into read-only mode with
+        ``ZODB.readonly.set_read_only``.  In that case, all connections
+        joined to it refuse to register changes.
+        """
+        transaction_manager = self.transaction_manager
+        if (transaction_manager is not None
+                and is_read_only(transaction_manager.get())):
+            raise POSException.ReadOnlyError(
+                "Cannot modify objects in a read-only transaction")
 
     def readCurrent(self, ob):
         assert ob._p_jar is self

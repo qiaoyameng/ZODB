@@ -20,6 +20,9 @@ from persistent import mapping
 
 from ZODB.DB import DB
 from ZODB.DB import connection
+from ZODB.readonly import is_read_only
+from ZODB.readonly import read_only
+from ZODB.readonly import set_read_only
 
 
 # Backward compat for old imports.

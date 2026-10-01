@@ -5,6 +5,13 @@
 6.4 (unreleased)
 ----------------
 
+- Add transaction-level read-only mode (``ZODB.readonly``).  Marking a
+  transaction read-only makes all connections joined to it reject
+  registered modifications, object additions, and blob writes with
+  ``ZODB.POSException.ReadOnlyError`` as they happen, instead of
+  failing at commit time.  Reads, including ghost activation, are
+  unaffected and other transactions may still write to the database.
+
 
 6.3 (2026-04-14)
 ----------------

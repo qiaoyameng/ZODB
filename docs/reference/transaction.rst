@@ -24,6 +24,22 @@ ITransaction
              addBeforeCommitHook, getBeforeCommitHooks,
              addAfterCommitHook, getAfterCommitHooks
 
+Read-only transactions
+======================
+
+ZODB can put a transaction into read-only mode, which is useful for
+code that must not modify the database, such as reporting.  All
+connections joined to a read-only transaction reject registered
+modifications, object additions, and blob writes with
+``ZODB.POSException.ReadOnlyError`` as they happen, rather than
+failing at commit time.  Reads, including ghost activation, are
+unaffected, and other transactions may still write to the database.
+The restriction ends with the transaction, so aborting and beginning
+the next transaction clears it.
+
+.. automodule:: ZODB.readonly
+   :members: set_read_only, is_read_only, read_only
+
 
 .. [#transaction-package-can-be-used-wo-ZODB] The :mod:`transaction`
    package is a general purpose package for managing `distributed

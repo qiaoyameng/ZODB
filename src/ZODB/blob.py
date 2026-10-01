@@ -177,6 +177,11 @@ class Blob(persistent.Persistent):
             if self.readers:
                 raise BlobError("Already opened for reading.")
 
+            if self._p_jar is not None:
+                # Refuse writes in a read-only transaction before
+                # creating any uncommitted files.
+                self._p_jar._check_read_only()
+
             if mode == 'w':
                 if self._p_blob_uncommitted is None:
                     self._create_uncommitted_file()
@@ -232,6 +237,8 @@ class Blob(persistent.Persistent):
             raise BlobError("Already opened for writing.")
         if self.readers:
             raise BlobError("Already opened for reading.")
+        if self._p_jar is not None:
+            self._p_jar._check_read_only()
 
         previous_uncommitted = bool(self._p_blob_uncommitted)
         if previous_uncommitted:

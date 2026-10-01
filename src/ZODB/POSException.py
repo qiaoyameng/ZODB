@@ -326,7 +326,7 @@ class MountedStorageError(StorageError):
 
 
 class ReadOnlyError(StorageError):
-    """Unable to modify objects in a read-only storage."""
+    """Unable to modify objects in a read-only storage or transaction."""
 
 
 class TransactionTooLargeError(StorageTransactionError):
