@@ -5,6 +5,16 @@
 6.4 (unreleased)
 ----------------
 
+- Add idempotent, batch-ID based database imports.  Connections gain
+  ``importFileBatch(stream, batch_id)`` which stores the batch summary
+  (digest of the export stream, size and object count) together with the
+  mapping of exported OIDs to newly allocated OIDs in the same
+  transaction as the imported object graph.  Repeating an import with the
+  same batch ID returns the original mapping, reusing the ID with
+  different content raises ``ImportBatchMismatchError``, and failed or
+  aborted imports leave no "already imported" marker.  Concurrent imports
+  of the same batch converge through the storage conflict mechanism
+  rather than in-process state.
 
 6.3 (2026-04-14)
 ----------------

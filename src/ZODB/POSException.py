@@ -337,6 +337,15 @@ class ExportError(POSError):
     """An export file doesn't have the right format."""
 
 
+class ImportBatchMismatchError(ExportError):
+    """A batch ID was reused with different content.
+
+    An idempotent import was attempted with a batch ID that was used
+    before, but the exported data (identified by its digest) differs
+    from the data of the original import.
+    """
+
+
 class Unsupported(POSError):
     """A feature was used that is not supported by the storage."""
 
