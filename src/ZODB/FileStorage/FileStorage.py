@@ -17,6 +17,7 @@
 import binascii
 import contextlib
 import errno
+import inspect
 import logging
 import os
 import time
@@ -51,6 +52,7 @@ from ZODB.FileStorage.format import CorruptedError
 from ZODB.FileStorage.format import DataHeader
 from ZODB.FileStorage.format import FileStorageFormatter
 from ZODB.FileStorage.format import TxnHeader
+from ZODB.FileStorage.historylease import HistoryLeaseManager
 from ZODB.FileStorage.fspack import FileStoragePacker
 from ZODB.fsIndex import fsIndex
 from ZODB.interfaces import IBlobStorageRestoreable
@@ -345,6 +347,24 @@ class FileStorage(
         else:
             self.blob_dir = None
             self._blob_init_no_blobs()
+
+        self._history_leases = HistoryLeaseManager(time.time)
+
+    def acquireHistoryLease(self, before, timeout):
+        with self._lock:
+            return self._history_leases.acquire(before, timeout)
+
+    def renewHistoryLease(self, lease, timeout=None):
+        with self._lock:
+            return self._history_leases.renew(lease, timeout)
+
+    def checkHistoryLease(self, lease):
+        with self._lock:
+            self._history_leases.check(lease)
+
+    def releaseHistoryLease(self, lease):
+        with self._lock:
+            self._history_leases.release(lease)
 
     def copyTransactionsFrom(self, other):
         if self.blob_dir:
@@ -1193,12 +1213,13 @@ class FileStorage(
         return file.read(1) not in ' u'
 
     @staticmethod
-    def packer(storage, referencesf, stop, gc):
+    def packer(storage, referencesf, stop, gc, retention_stop=None):
         # Our default packer is built around the original packer.  We
         # simply adapt the old interface to the new.  We don't really
         # want to invest much in the old packer, at least for now.
         assert referencesf is not None
-        p = FileStoragePacker(storage, referencesf, stop, gc)
+        p = FileStoragePacker(
+            storage, referencesf, stop, gc, retention_stop=retention_stop)
         try:
             opos = p.pack()
             if opos is None:
@@ -1227,11 +1248,6 @@ class FileStorage(
         if not self._index:
             return
 
-        with self._lock:
-            if self._pack_is_in_progress:
-                raise FileStorageError('Already packing')
-            self._pack_is_in_progress = True
-
         if gc is None:
             gc = self._pack_gc
 
@@ -1242,13 +1258,45 @@ class FileStorage(
             remove_committed_dir(self.blob_dir + ".old")
 
         have_commit_lock = False
+        pack_started = False
+        pack_committed = False
         try:
             pack_result = None
             try:
-                pack_result = self.packer(self, referencesf, stop, gc)
+                with self._lock:
+                    if self._pack_is_in_progress:
+                        raise FileStorageError('Already packing')
+                    effective_stop = self._history_leases.begin_pack(stop)
+                    if effective_stop < stop:
+                        effective_scan_stop = TimeStamp(
+                            effective_stop).laterThan(
+                                TimeStamp(effective_stop)).raw()
+                    else:
+                        effective_scan_stop = stop
+                    pack_started = True
+                packer = self.packer
+                try:
+                    packer_parameters = inspect.signature(
+                        packer).parameters
+                    packer_supports_retention = (
+                        'retention_stop' in packer_parameters)
+                except (TypeError, ValueError):
+                    packer_supports_retention = False
+                if packer_supports_retention:
+                    pack_result = packer(
+                        self, referencesf, effective_scan_stop, gc,
+                        retention_stop=effective_stop)
+                else:
+                    # Custom packers may implement the older four-argument
+                    # packer API.
+                    pack_result = packer(
+                        self, referencesf, effective_scan_stop, gc)
             except RedundantPackWarning as detail:
                 logger.info(str(detail))
             if pack_result is None:
+                with self._lock:
+                    self._history_leases.finish_pack(effective_stop)
+                    pack_committed = True
                 return
             have_commit_lock = True
             opos, index = pack_result
@@ -1267,6 +1315,8 @@ class FileStorage(
                     self._file = open(self._file_name, 'r+b')
                     self._initIndex(index, self._tindex)
                     self._pos = opos
+                    self._history_leases.finish_pack(effective_stop)
+                    pack_committed = True
 
             # We're basically done.  Now we need to deal with removed
             # blobs and removing the .old file (see further down).
@@ -1281,6 +1331,8 @@ class FileStorage(
                 self._commit_lock.release()
             with self._lock:
                 self._pack_is_in_progress = False
+                if pack_started and not pack_committed:
+                    self._history_leases.cancel_pack()
 
         if not self.pack_keep_old:
             os.remove(oldpath)

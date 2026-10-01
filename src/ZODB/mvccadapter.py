@@ -234,14 +234,46 @@ class HistoricalStorageAdapter(Base):
     """Adapt a storage to a historical storage
     """
 
+    default_history_lease_timeout = 300
+
     _copy_methods = Base._copy_methods + (
-        'loadSerial', 'tpc_begin', 'tpc_finish', 'tpc_abort', 'tpc_vote',
+        'tpc_begin', 'tpc_finish', 'tpc_abort', 'tpc_vote',
         'checkCurrentSerialInTransaction',
     )
 
     def __init__(self, storage, before=None):
         Base.__init__(self, storage)
         self._before = before
+        self._history_lease = None
+
+    def acquireHistoryLease(self, timeout=None):
+        if timeout is None:
+            timeout = self.default_history_lease_timeout
+        acquire = getattr(self._storage, 'acquireHistoryLease', None)
+        if acquire is not None:
+            self._history_lease = acquire(self._before, timeout)
+        return self._history_lease
+
+    def renewHistoryLease(self, timeout=None):
+        lease = self._history_lease
+        if lease is None:
+            raise POSException.ConnectionStateError(
+                'The database connection is closed')
+        renew = getattr(self._storage, 'renewHistoryLease', None)
+        if renew is not None:
+            self._history_lease = renew(lease, timeout)
+        return self._history_lease
+
+    renewLease = renewHistoryLease
+
+    def releaseHistoryLease(self):
+        lease = self._history_lease
+        if lease is not None:
+            release_lease = getattr(
+                self._storage, 'releaseHistoryLease', None)
+            if release_lease is not None:
+                release_lease(lease)
+            self._history_lease = None
 
     def isReadOnly(self):
         return True
@@ -256,6 +288,7 @@ class HistoricalStorageAdapter(Base):
             pass
         else:
             release()
+        self.releaseHistoryLease()
 
     close = release
 
@@ -268,10 +301,22 @@ class HistoricalStorageAdapter(Base):
     new_oid = pack = store = read_only_writer
 
     def load(self, oid, version=''):
+        self._checkHistoryLease()
         r = self._storage.loadBefore(oid, self._before)
         if r is None:
             raise POSException.POSKeyError(oid)
         return r[:2]
+
+    def loadSerial(self, oid, serial):
+        self._checkHistoryLease()
+        return self._storage.loadSerial(oid, serial)
+
+    def _checkHistoryLease(self):
+        lease = self._history_lease
+        if lease is not None:
+            check = getattr(self._storage, 'checkHistoryLease', None)
+            if check is not None:
+                check(lease)
 
 
 class UndoAdapterInstance(Base):

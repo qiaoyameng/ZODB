@@ -172,6 +172,18 @@ class ReadConflictError(ConflictError):
                                serials=serials, **kw)
 
 
+class HistoryLeaseError(ReadConflictError):
+    """A historical snapshot can no longer be read consistently."""
+
+
+class HistoryLeaseExpiredError(HistoryLeaseError):
+    """A historical retention lease expired before the read."""
+
+
+class HistoryLeaseReleasedError(HistoryLeaseError):
+    """A historical retention lease was released."""
+
+
 class BTreesConflictError(ConflictError):
     """A special subclass for BTrees conflict errors."""
 

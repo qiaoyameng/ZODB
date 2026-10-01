@@ -356,6 +356,7 @@ class DB:
                  historical_cache_size=1000,
                  historical_cache_size_bytes=0,
                  historical_timeout=300,
+                 historical_lease_timeout=300,
                  database_name='unnamed',
                  databases=None,
                  xrefs=True,
@@ -394,6 +395,9 @@ class DB:
              unused in a historical connection pool for more than pool_timeout
              seconds, it will be discarded and it's resources
              released.
+        :param seconds historical_lease_timeout: Time after which an
+             inactive historical connection's retention lease expires.
+             Explicit renewal extends the lease.
         :param str database_name: The name of this database in a
              multi-database configuration.  The name is used when
              constructing cross-database references ans when accessing
@@ -431,6 +435,7 @@ class DB:
         self._cache_size_bytes = cache_size_bytes
         self._historical_cache_size = historical_cache_size
         self._historical_cache_size_bytes = historical_cache_size_bytes
+        self._historical_lease_timeout = historical_lease_timeout
 
         # Setup storage
         if isinstance(storage, str):
@@ -723,7 +728,8 @@ class DB:
         """
         return len(self.storage)
 
-    def open(self, transaction_manager=None, at=None, before=None):
+    def open(self, transaction_manager=None, at=None, before=None,
+             history_lease_timeout=None):
         """Return a database Connection for use by application code.
 
         Note that the connection pool is managed as a stack, to
@@ -739,7 +745,10 @@ class DB:
             opens a standard writable transaction of the newest state.
             A timezone-naive datetime.datetime is treated as a UTC value.
           - `before`: like `at`, but opens the readonly state before the
-            tid or datetime.
+          tid or datetime.
+        :param history_lease_timeout: number of seconds to retain
+             revisions needed by this historical connection; defaults to
+             the database's ``historical_lease_timeout``.
         """
         # `at` is normalized to `before`, since we use storage.loadBefore
         # as the underlying implementation of both.
@@ -788,7 +797,10 @@ class DB:
             self.pool.availableGC()
             self.historical_pool.availableGC()
 
-        result.open(transaction_manager)
+        if history_lease_timeout is None:
+            history_lease_timeout = self._historical_lease_timeout
+        result.open(transaction_manager,
+                    history_lease_timeout=history_lease_timeout)
         return result
 
     def connectionDebugInfo(self):

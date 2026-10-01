@@ -53,9 +53,10 @@ class PackCopier(FileStorageFormatter):
         self._index = index
         self._tindex = tindex
         self._pos = None
+        self._retained_positions = {}
 
     def _txn_find(self, tid, stop_at_pack):
-        # _pos always points just past the last transaction
+        # _pos always points past the most recently copied transaction.
         pos = self._pos
         while pos > 4:
             self._file.seek(pos - 8)
@@ -81,9 +82,9 @@ class PackCopier(FileStorageFormatter):
         # oid's data record is returned.  This data record should contain
         # a pickle identical to the 'data' argument.
 
-        # Unclear:  If the length of the stored data doesn't match len(data),
-        # an exception is raised.  If the lengths match but the data isn't
-        # the same, 0 is returned.  Why the discrepancy?
+        # Unclear:  If the length of the stored data doesn't match
+        # len(data), an exception is raised.  If the lengths match but
+        # the data isn't the same, 0 is returned.  Why the discrepancy?
         h = self._read_txn_header(tpos)
         tend = tpos + h.tlen
         pos = self._file.tell()
@@ -107,8 +108,11 @@ class PackCopier(FileStorageFormatter):
             pos += h.recordlen()
         return 0
 
-    def copy(self, oid, serial, data, prev_txn, txnpos, datapos):
-        prev_pos = self._resolve_backpointer(prev_txn, oid, data)
+    def copy(self, oid, serial, data, prev_txn, txnpos, datapos,
+             retained_prev=0):
+        prev_pos = retained_prev
+        if not prev_pos:
+            prev_pos = self._resolve_backpointer(prev_txn, oid, data)
         old = self._index.get(oid, 0)
         # Calculate the pos the record will have in the storage.
         here = datapos
@@ -122,6 +126,8 @@ class PackCopier(FileStorageFormatter):
         else:
             dlen = len(data)
         # Write the recovery data record
+        if data is not None and retained_prev:
+            old = retained_prev
         h = DataHeader(oid, serial, old, txnpos, 0, dlen)
 
         self._file.write(h.asString())
@@ -135,6 +141,9 @@ class PackCopier(FileStorageFormatter):
                 self._file.write(z64)
         else:
             self._file.write(data)
+
+    def map_retained_position(self, source_pos, new_pos):
+        self._retained_positions[source_pos] = new_pos
 
     def setTxnPos(self, pos):
         self._pos = pos
@@ -154,17 +163,24 @@ class PackCopier(FileStorageFormatter):
 
 class GC(FileStorageFormatter):
 
-    def __init__(self, file, eof, packtime, gc, referencesf):
+    def __init__(self, file, eof, packtime, gc, referencesf,
+                 retentiontime=None):
         self._file = file
         self._name = file.name
         self.eof = eof
         self.packtime = packtime
+        if retentiontime is None:
+            retentiontime = packtime
+        self.retentiontime = retentiontime
         self.gc = gc
-        # packpos: position of first txn header after pack time
+        # packpos: position of first txn header after the requested pack time
         self.packpos = None
 
         # {oid -> current data record position}:
         self.oid2curpos = ZODB.fsIndex.fsIndex()
+
+        # {oid -> data record position current as of the oldest lease bound}
+        self.oid2retentionpos = ZODB.fsIndex.fsIndex()
 
         # The set of reachable revisions of each object.
         #
@@ -177,6 +193,7 @@ class GC(FileStorageFormatter):
         # for which we must keep multiple revisions.
         self.reachable = ZODB.fsIndex.fsIndex()
         self.reach_ex = {}
+        self.retention_reach_ex = set()
 
         # keep ltid for consistency checks during initial scan
         self.ltid = z64
@@ -197,12 +214,15 @@ class GC(FileStorageFormatter):
         self.buildPackIndex()
         if self.gc:
             self.findReachableAtPacktime([z64])
+        else:
+            self.reachable = self.oid2curpos
+        self.findReachableAtRetentionTime()
+        self.retention_reach_ex = set(self._retention_extras)
+        if self.gc:
             self.findReachableFromFuture()
             # These mappings are no longer needed and may consume a lot of
             # space.
             del self.oid2curpos
-        else:
-            self.reachable = self.oid2curpos
 
     def buildPackIndex(self):
         pos = 4
@@ -232,6 +252,11 @@ class GC(FileStorageFormatter):
                 else:
                     if dh.oid in self.oid2curpos:
                         del self.oid2curpos[dh.oid]
+                if th.tid <= self.retentiontime:
+                    if dh.plen or dh.back:
+                        self.oid2retentionpos[dh.oid] = pos
+                    elif dh.oid in self.oid2retentionpos:
+                        del self.oid2retentionpos[dh.oid]
                 pos += dh.recordlen()
 
             tlen = self._read_num(pos)
@@ -242,7 +267,6 @@ class GC(FileStorageFormatter):
             pos += 8
 
         self.packpos = pos
-
         if unpacked:
             return
         # check for a redundant pack.  If the first record following
@@ -286,6 +310,8 @@ class GC(FileStorageFormatter):
                     todo.append(oid)
 
     def findReachableFromFuture(self):
+        pos = self.packpos
+
         # In this pass, the roots are positions of object revisions.
         # We add a pos to extra_roots when there is a backpointer to a
         # revision that was not current at the packtime.  The
@@ -293,7 +319,6 @@ class GC(FileStorageFormatter):
         # otherwise unreachable at the packtime.
         extra_roots = []
 
-        pos = self.packpos
         while pos < self.eof:
             th = self._read_txn_header(pos)
             self.checkTxn(th, pos)
@@ -327,6 +352,26 @@ class GC(FileStorageFormatter):
             refs = self.findrefs(pos)
             self.findReachableAtPacktime(refs)
 
+    def findReachableAtRetentionTime(self):
+        if self.retentiontime < self.packtime:
+            self._retention_extras = []
+            for oid, pos in self.oid2retentionpos.items():
+                if self.reachable.get(oid) is None:
+                    self.reachable[oid] = pos
+                elif self.reachable.get(oid) != pos:
+                    L = self.reach_ex.setdefault(oid, [])
+                    if pos not in L:
+                        L.append(pos)
+                        self._retention_extras.append(pos)
+
+            for pos in self._retention_extras:
+                self.findReachableAtPacktime(self.findrefs(pos))
+        else:
+            self._retention_extras = []
+
+        if self.gc:
+            del self.oid2retentionpos
+
     def findrefs(self, pos):
         """Return a list of oids referenced as of packtime."""
         dh = self._read_data_header(pos)
@@ -347,7 +392,8 @@ class FileStoragePacker(FileStorageFormatter):
     # lives before that offset (there may be a checkpoint transaction in
     # progress after it).
 
-    def __init__(self, storage, referencesf, stop, gc=True):
+    def __init__(self, storage, referencesf, stop, gc=True,
+                 retention_stop=None):
         self._storage = storage
         if storage.blob_dir:
             self.pack_blobs = True
@@ -366,10 +412,13 @@ class FileStoragePacker(FileStorageFormatter):
         self._file = open(path, "rb")
         self._path = path
         self._stop = stop
+        if retention_stop is None:
+            retention_stop = stop
         self.locked = False
         self.file_end = storage.getSize()
 
-        self.gc = GC(self._file, self.file_end, self._stop, gc, referencesf)
+        self.gc = GC(self._file, self.file_end, self._stop, gc,
+                     referencesf, retention_stop)
 
         # The packer needs to acquire the parent's commit lock
         # during the copying stage, so the two sets of lock acquire
@@ -537,6 +586,7 @@ class FileStoragePacker(FileStorageFormatter):
         pos += th.headerlen()
         while pos < tend:
             h = self._read_data_header(pos)
+            source_pos = pos
             if not self.gc.isReachable(h.oid, pos):
                 if self.pack_blobs:
                     # We need to find out if this is a blob, so get the data:
@@ -583,7 +633,11 @@ class FileStoragePacker(FileStorageFormatter):
             else:
                 data = self.fetchDataViaBackpointer(h.oid, h.back)
 
-            self.writePackedDataRecord(h, data, new_tpos)
+            retained_source_pos = (
+                source_pos
+                if source_pos in self.gc.retention_reach_ex else 0)
+            self.writePackedDataRecord(
+                h, data, new_tpos, retained_source_pos)
 
         return new_tpos, pos
 
@@ -599,7 +653,7 @@ class FileStoragePacker(FileStorageFormatter):
         data, tid = self._loadBackTxn(oid, back, 0)
         return data
 
-    def writePackedDataRecord(self, h, data, new_tpos):
+    def writePackedDataRecord(self, h, data, new_tpos, source_pos):
         # Update the header to reflect current information, then write
         # it to the output file.
         if data is None:
@@ -610,6 +664,8 @@ class FileStoragePacker(FileStorageFormatter):
         h.tloc = new_tpos
         pos = self._tfile.tell()
         self.index[h.oid] = pos
+        if source_pos:
+            self._copier.map_retained_position(source_pos, pos)
         self._tfile.write(h.asString())
         self._tfile.write(data)
         if not data:
@@ -649,6 +705,7 @@ class FileStoragePacker(FileStorageFormatter):
 
         while ipos < tend:
             h = self._read_data_header(ipos)
+            retained_prev = self._copier._retained_positions.get(h.prev, 0)
             ipos += h.recordlen()
             prev_txn = None
             if h.plen:
@@ -659,7 +716,7 @@ class FileStoragePacker(FileStorageFormatter):
                     prev_txn = self.getTxnFromData(h.oid, h.back)
 
             self._copier.copy(h.oid, h.tid, data, prev_txn,
-                              pos, self._tfile.tell())
+                              pos, self._tfile.tell(), retained_prev)
 
         tlen = self._tfile.tell() - pos
         assert tlen == th.tlen

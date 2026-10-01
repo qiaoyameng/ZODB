@@ -313,6 +313,9 @@ class Connection(ExportImport):
         if hasattr(self._storage, 'afterCompletion'):
             self._storage.afterCompletion()
 
+        if self.before is not None and self.opened is not None:
+            self._release_history_lease()
+
         if primary:
             for connection in self.connections.values():
                 if connection is not self:
@@ -341,6 +344,21 @@ class Connection(ExportImport):
         if self.opened is None:
             raise ConnectionStateError("The database connection is closed")
         return self._storage.isReadOnly()
+
+    def renewHistoryLease(self, timeout=None):
+        """Extend the retention lease for an historical connection."""
+        if self.opened is None:
+            raise ConnectionStateError("The database connection is closed")
+        if self.before is None:
+            raise ConnectionStateError("Not an historical connection")
+        return self._storage.renewHistoryLease(timeout)
+
+    renewLease = renewHistoryLease
+
+    def _release_history_lease(self):
+        release = getattr(self._storage, 'releaseHistoryLease', None)
+        if release is not None:
+            release()
 
     @property
     def root(self):
@@ -859,7 +877,8 @@ class Connection(ExportImport):
         # return a list of [ghosts....not recently used.....recently used]
         return list(everything.items()) + items
 
-    def open(self, transaction_manager=None, delegate=True):
+    def open(self, transaction_manager=None, delegate=True,
+             history_lease_timeout=None):
         """Register odb, the DB that this Connection uses.
 
         This method is called by the DB every time a Connection
@@ -893,6 +912,9 @@ class Connection(ExportImport):
             # New code is in place.  Start a new cache.
             self._resetCache()
 
+        if self.before is not None:
+            self._storage.acquireHistoryLease(history_lease_timeout)
+
         if not self.explicit_transactions:
             # This newTransaction is to deal with some pathalogical cases:
             #
@@ -921,7 +943,8 @@ class Connection(ExportImport):
             # delegate open to secondary connections
             for connection in self.connections.values():
                 if connection is not self:
-                    connection.open(transaction_manager, False)
+                    connection.open(
+                        transaction_manager, False, history_lease_timeout)
 
     def _resetCache(self):
         """Creates a new cache, discarding the old one.
@@ -938,6 +961,8 @@ class Connection(ExportImport):
     def _release_resources(self):
         for c in self.connections.values():
             if c._storage is not None:
+                if c.before is not None and c.opened is not None:
+                    c._release_history_lease()
                 c._storage.release()
             c._storage = c._normal_storage = None
             c._cache = PickleCache(self, 0, 0)
