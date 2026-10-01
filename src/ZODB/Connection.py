@@ -200,6 +200,25 @@ class Connection(ExportImport):
     def new_oid(self):
         return self._storage.new_oid()
 
+    def change_preview(self):
+        """Return a read-only preview of the records this connection
+        would write if the current transaction committed now.
+
+        Each entry is an
+        :class:`~ZODB.changepreview.ObjectChange` describing the
+        object's oid (or a preview-only identity for implicitly added
+        new objects), its class, the serial it's based on, the size of
+        the serialized record that would be written, and whether blob
+        payload data would change.
+
+        The preview is purely informational: it does not start a commit
+        or savepoint, does not clear dirty flags, and any temporary
+        identities assigned to new objects are discarded as soon as the
+        preview has been computed.
+        """
+        from ZODB.changepreview import change_preview
+        return change_preview(self)
+
     def add(self, obj):
         """Add a new object 'obj' to the database and assign it an oid."""
         if self.opened is None:

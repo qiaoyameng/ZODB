@@ -5,6 +5,15 @@
 6.4 (unreleased)
 ----------------
 
+- Add a read-only change preview API,
+  ``IConnection.change_preview()``.  It returns the object records the
+  current transaction would write (oid or a preview-only identity for
+  implicitly added new objects, class information, old revision serial,
+  serialized record size, and whether blob payload data changes)
+  without committing, clearing dirty flags, or permanently assigning
+  object ids.  Repeated calls reflect the current transaction state,
+  including after a savepoint rollback.
+
 
 6.3 (2026-04-14)
 ----------------

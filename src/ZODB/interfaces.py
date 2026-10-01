@@ -131,6 +131,50 @@ class IConnection(Interface):
         Raises ConnectionStateError if the connection is closed.
         """
 
+    def change_preview():
+        """Return a read-only preview of pending writes.
+
+        Compute the object records that would be written if the current
+        transaction committed now, without committing anything.
+
+        Returns a sequence of objects with the following attributes:
+
+        oid
+            The object id.  For new objects that were not explicitly
+            added with :meth:`add` (and therefore have no stable oid
+            yet), this is a preview-only identity.  These identities
+            are valid only within the returned sequence: identical
+            values identify the same object (for example when new
+            objects reference each other), but they are never written
+            to the storage and identities may differ between calls.
+
+        class_name
+            The dotted name of the object's class.
+
+        klass
+            The object's class, or None if it cannot be resolved.
+
+        old_serial
+            The serial the record is based on.  This is the object's
+            current database revision, or a null serial for new
+            objects.
+
+        new_size
+            The size in bytes of the serialized record that would be
+            written.
+
+        blob_changed
+            True if the object is a blob whose payload would be
+            written; otherwise False.
+
+        The preview does not commit or abort the transaction, does not
+        create a savepoint, does not clear the dirty state of any
+        object, and does not permanently assign oids: objects that
+        received a preview-only identity still have no oid after the
+        call.  Repeated calls reflect the current state of the
+        transaction, including after a savepoint has been rolled back.
+        """
+
     def get(oid):
         """Return the persistent object with oid 'oid'.
 
