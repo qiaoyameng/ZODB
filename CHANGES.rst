@@ -5,6 +5,15 @@
 6.4 (unreleased)
 ----------------
 
+- Add ``ZODB.FileStorage.fsverify``, a read-only structural verifier
+  for FileStorage data files that can run while the storage is open,
+  and a corresponding ``FileStorage.verify()`` method.  It pins a
+  complete transaction boundary (a tail that is still being appended
+  is not reported as corruption), checks record lengths, transaction
+  trailers, OID revision back pointers and blob references, and
+  supports resuming from a previously verified checkpoint.  Nothing
+  is ever repaired or written.
+
 
 6.3 (2026-04-14)
 ----------------

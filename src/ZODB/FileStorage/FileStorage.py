@@ -527,6 +527,21 @@ class FileStorage(
     def getSize(self):
         return self._pos
 
+    def verify(self, checkpoint=None):
+        """Verify the structural integrity of the storage data file.
+
+        The file is checked read-only, so this may be called while the
+        storage is open and in use.  ``checkpoint`` may be the
+        ``checkpoint`` attribute of a report returned by an earlier
+        call, to verify only transactions appended since then.
+
+        Returns a :class:`ZODB.FileStorage.fsverify.VerifyReport`.
+        Nothing is ever repaired or written.
+        """
+        from ZODB.FileStorage.fsverify import verify_file_storage
+        return verify_file_storage(self._file_name, checkpoint=checkpoint,
+                                   blob_dir=self.blob_dir)
+
     def _lookup_pos(self, oid):
         try:
             return self._index[oid]
