@@ -19,15 +19,19 @@ import os
 import tempfile
 import time
 import warnings
+from typing import NamedTuple
 
 import transaction
 from persistent import PickleCache
+from persistent import Persistent
 # interfaces
 from persistent.interfaces import IPersistentDataManager
+from persistent.wref import WeakRef
 from transaction.interfaces import IDataManagerSavepoint
 from transaction.interfaces import ISavepointDataManager
 from transaction.interfaces import ISynchronizer
 from zope.interface import implementer
+from zodbpickle import binary
 
 import ZODB
 from ZODB import POSException
@@ -84,6 +88,40 @@ def resetCaches():
 def className(obj):
     cls = type(obj)
     return f"{cls.__module__}.{cls.__name__}"
+
+
+class ChangePreview(NamedTuple):
+    """Read-only description of a single pending object write.
+
+    Instances of this class are returned by
+    :meth:`Connection.preview`.  They describe what a commit of the
+    current transaction would write to the storage, without writing
+    anything.
+    """
+
+    #: The object's oid, or None if the object doesn't have a stable
+    #: oid yet (it is a new object that was never added explicitly).
+    oid: bytes | None
+
+    #: Identifier of the object within the preview.  This is the
+    #: printable oid for objects that have one, and a preview-scoped
+    #: identifier (``new-<n>``) for new objects without a stable oid.
+    #: Preview-scoped identifiers are only meaningful within the list
+    #: returned by a single ``preview()`` call.
+    preview_id: str
+
+    #: Dotted name of the object's class.
+    class_name: str
+
+    #: The serial (transaction id) of the object's currently committed
+    #: revision, or None if the object was never committed.
+    old_serial: bytes | None
+
+    #: Size in bytes of the object's serialized state.
+    new_size: int
+
+    #: Whether the object's blob data changed in this transaction.
+    blob_changed: bool
 
 
 @implementer(IConnection,
@@ -397,6 +435,57 @@ class Connection(ExportImport):
             self._load_count = 0
             self._store_count = 0
         return res
+
+    def preview(self):
+        """Return a read-only preview of pending changes.
+
+        Returns a list of :class:`ChangePreview` objects, one for each
+        object that would be written to the storage if the current
+        transaction were committed now.  This includes changes that
+        were already checkpointed in savepoints.
+
+        The preview is purely informational: it neither commits nor
+        aborts the transaction, it doesn't clear objects' dirty flags,
+        and it doesn't assign permanent identities to new objects.
+        New objects that don't have an oid yet are identified by a
+        preview-scoped ``preview_id`` and reported with an ``oid`` of
+        None.
+        """
+        if self.opened is None:
+            raise ConnectionStateError("The database connection is closed")
+
+        collector = _PreviewCollector()
+
+        # Changes that were already checkpointed in savepoints are
+        # written to the real storage by _commit_savepoint() when the
+        # transaction commits.
+        if self._savepoint_storage is not None:
+            store = self._savepoint_storage
+            for oid in sorted(store.index):
+                data, serial = store.load(oid)
+                ghost = self._reader.getGhost(data)
+                collector.add(
+                    oid,
+                    ghost,
+                    serial,
+                    len(data),
+                    isinstance(ghost, Blob) and oid in store.blobs,
+                )
+
+        # Objects registered as changed or added in this transaction.
+        # This mirrors _commit(), except that nothing is stored.
+        for obj in self._registered_objects:
+            oid = obj._p_oid
+            if obj._p_jar is not self:
+                raise InvalidObjectReference(obj, obj._p_jar)
+            if oid not in self._added and (
+                    oid in self._creating or not obj._p_changed):
+                # Nothing would be stored for this object.  See
+                # _commit() for why this can happen.
+                continue
+            collector.serialize(obj)
+
+        return collector.items()
 
     # Connection methods
     ##########################################################################
@@ -986,6 +1075,7 @@ class Connection(ExportImport):
         state = (self._storage.position,
                  self._storage.index.copy(),
                  self._storage.creating.copy(),
+                 self._storage.blobs.copy(),
                  )
         result = Savepoint(self, state)
         # While the interface doesn't guarantee this, savepoints are
@@ -1101,6 +1191,109 @@ class Connection(ExportImport):
                         yield ob._p_oid
 
 
+class _PreviewWriter(ObjectWriter):
+    """ObjectWriter that doesn't assign identities to new objects.
+
+    Used by Connection.preview(): new objects that don't have an oid
+    yet are serialized using temporary oids that are only valid for
+    the duration of the preview.  Neither the objects nor the storage
+    are modified.
+    """
+
+    def __init__(self, obj, temp_oids):
+        super().__init__(obj)
+        self._temp_oids = temp_oids  # {id(obj): temporary oid}
+
+    def _temp_oid(self, obj):
+        oid = self._temp_oids.get(id(obj))
+        if oid is None:
+            # 8 bytes, like a real oid, so that serialized sizes match
+            # a real commit.  The \xff prefix can't be confused with
+            # oids allocated by a storage, which counts up from 0.
+            oid = self._temp_oids[id(obj)] = \
+                b'\xff' + p64(len(self._temp_oids) + 1)[1:]
+        return oid
+
+    def persistent_id(self, obj):
+        if isinstance(obj, (Persistent, type)):
+            try:
+                oid = obj._p_oid
+            except AttributeError:
+                # Not persistent, pickle normally.
+                return None
+            if oid is None:
+                # A new object that doesn't have an oid yet.  Use a
+                # temporary oid instead of assigning a real one.
+                oid = binary(self._temp_oid(obj))
+                self._stack.append(obj)
+                klass = type(obj)
+                if hasattr(klass, '__getnewargs__'):
+                    return oid
+                return oid, klass
+        elif isinstance(obj, WeakRef) and obj.oid is None:
+            target = obj()
+            if target is not None and target._p_oid is None:
+                oid = binary(self._temp_oid(target))
+                self._stack.append(target)
+                return ['w', (oid, )]
+        return super().persistent_id(obj)
+
+
+class _PreviewCollector:
+    """Helper for Connection.preview()."""
+
+    def __init__(self):
+        self._items = {}  # oid or ('new', id(obj)) -> ChangePreview
+        self._temp_oids = {}  # {id(obj): temporary oid}
+        self._preview_ids = {}  # {id(obj): preview-scoped identifier}
+
+    def _preview_id(self, obj):
+        key = id(obj)
+        preview_id = self._preview_ids.get(key)
+        if preview_id is None:
+            preview_id = self._preview_ids[key] = \
+                'new-%d' % (len(self._preview_ids) + 1)
+        return preview_id
+
+    def add(self, oid, obj, old_serial, new_size, blob_changed):
+        if oid is None:
+            key = 'new', id(obj)
+            preview_id = self._preview_id(obj)
+        else:
+            key = oid
+            preview_id = oid_repr(oid)
+        self._items[key] = ChangePreview(
+            oid=oid,
+            preview_id=preview_id,
+            class_name=className(obj),
+            old_serial=None if old_serial in (None, z64) else old_serial,
+            new_size=new_size,
+            blob_changed=blob_changed,
+        )
+
+    def serialize(self, obj):
+        # Mirror _store_objects(), except that nothing is stored and
+        # no state is changed.
+        writer = _PreviewWriter(obj, self._temp_oids)
+        for obj in writer:
+            oid = obj._p_oid
+            data = writer.serialize(obj)  # This calls __getstate__ of obj
+            if isinstance(obj, Blob):
+                if (obj._p_blob_uncommitted is None
+                        and obj._p_blob_committed is not None):
+                    # The blob data didn't change.  _store_objects()
+                    # doesn't store anything in this case.
+                    continue
+                blob_changed = True
+            else:
+                blob_changed = False
+            self.add(oid, obj, getattr(obj, '_p_serial', z64),
+                     len(data), blob_changed)
+
+    def items(self):
+        return list(self._items.values())
+
+
 @implementer(IDataManagerSavepoint)
 class Savepoint:
 
@@ -1131,6 +1324,8 @@ class TmpStore:
         # index: map oid to pos of last committed version
         self.index = {}
         self.creating = {}
+        # oids of objects whose blob data is stored in this TmpStore
+        self.blobs = set()
         self._blob_dir = None
 
     def getSize(self):
@@ -1179,6 +1374,7 @@ class TmpStore:
                   transaction):
         assert version == ''
         serial = self.store(oid, serial, data, '', transaction)
+        self.blobs.add(oid)
 
         targetpath = self._getBlobPath()
         if not os.path.exists(targetpath):
@@ -1224,7 +1420,7 @@ class TmpStore:
     def temporaryDirectory(self):
         return self._storage.temporaryDirectory()
 
-    def reset(self, position, index, creating):
+    def reset(self, position, index, creating, blobs=()):
         self._file.truncate(position)
         self.position = position
         # Caution:  We're typically called as part of a savepoint rollback.
@@ -1238,6 +1434,7 @@ class TmpStore:
         # all callers pass copies.  As is, our callers do not make copies.
         self.index = index.copy()
         self.creating = creating
+        self.blobs = set(blobs)
 
 
 class RootConvenience:

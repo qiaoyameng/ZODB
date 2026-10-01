@@ -258,6 +258,18 @@ class IConnection(Interface):
         If clear is True, reset the counters.
         """
 
+    def preview():
+        """Return a read-only preview of pending changes.
+
+        Returns a list of ChangePreview objects, one for each object
+        that would be written to the storage if the current
+        transaction were committed now.
+
+        The preview doesn't change any state: the transaction is
+        neither committed nor aborted, objects' dirty flags are left
+        intact, and no identities (oids) are assigned to new objects.
+        """
+
     def readCurrent(obj):
         """Make sure an object being read is current
 

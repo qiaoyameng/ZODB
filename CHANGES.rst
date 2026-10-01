@@ -5,6 +5,15 @@
 6.4 (unreleased)
 ----------------
 
+- Add ``Connection.preview()`` returning a read-only preview of the
+  changes a commit of the current transaction would write.  For each
+  pending object write it reports the oid (or a preview-scoped
+  identifier for new objects without a stable oid), the class name,
+  the old revision, the new serialized size and whether blob data
+  changed.  The preview does not commit the transaction, does not
+  clear dirty flags and does not assign permanent identities to new
+  objects.
+
 
 6.3 (2026-04-14)
 ----------------

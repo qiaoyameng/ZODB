@@ -84,8 +84,10 @@ Connections
 .. autoclass:: ZODB.Connection.Connection
    :members: add, cacheGC, cacheMinimize, close, db, get,
              getDebugInfo, get_connection, isReadOnly, oldstate,
-             onCloseCallback, root, setDebugInfo, sync,
+             onCloseCallback, preview, root, setDebugInfo, sync,
              transaction_manager
+
+.. autoclass:: ZODB.Connection.ChangePreview
 
 TimeStamp (transaction ids)
 ===========================
