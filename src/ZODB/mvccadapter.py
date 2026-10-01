@@ -242,6 +242,7 @@ class HistoricalStorageAdapter(Base):
     def __init__(self, storage, before=None):
         Base.__init__(self, storage)
         self._before = before
+        self._lease = None
 
     def isReadOnly(self):
         return True
@@ -249,7 +250,31 @@ class HistoricalStorageAdapter(Base):
     def supportsUndo(self):
         return False
 
+    def acquire_lease(self):
+        """Register a historical read lease, if the storage has a registry.
+
+        Called when an historical connection using this adapter is
+        opened.  The lease records the connection's read lower bound so
+        that packing retains the revisions it needs.
+        """
+        registry = getattr(self._storage, 'historical_lease_registry', None)
+        if registry is not None and self._lease is None:
+            self._lease = registry.register(self._before)
+
+    def release_lease(self):
+        """Release the historical read lease, if any.  Idempotent."""
+        lease, self._lease = self._lease, None
+        if lease is not None:
+            lease.release()
+
+    def renew_lease(self):
+        """Renew the historical read lease, if any."""
+        lease = self._lease
+        if lease is not None:
+            lease.renew()
+
     def release(self):
+        self.release_lease()
         try:
             release = self._storage.release
         except AttributeError:
@@ -268,6 +293,11 @@ class HistoricalStorageAdapter(Base):
     new_oid = pack = store = read_only_writer
 
     def load(self, oid, version=''):
+        lease = self._lease
+        if lease is not None and lease.expired():
+            raise POSException.HistoricalLeaseExpired(
+                "the historical read lease expired; the requested"
+                " revisions may have been packed away")
         r = self._storage.loadBefore(oid, self._before)
         if r is None:
             raise POSException.POSKeyError(oid)

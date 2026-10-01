@@ -53,6 +53,7 @@ from ZODB.FileStorage.format import FileStorageFormatter
 from ZODB.FileStorage.format import TxnHeader
 from ZODB.FileStorage.fspack import FileStoragePacker
 from ZODB.fsIndex import fsIndex
+from ZODB.historical_leases import HistoricalLeaseRegistry
 from ZODB.interfaces import IBlobStorageRestoreable
 from ZODB.interfaces import IExternalGC
 from ZODB.interfaces import IStorage
@@ -157,7 +158,8 @@ class FileStorage(
 
     def __init__(self, file_name, create=False, read_only=False, stop=None,
                  quota=None, pack_gc=True, pack_keep_old=True, packer=None,
-                 blob_dir=None):
+                 blob_dir=None, historical_lease_timeout=300.0,
+                 historical_lease_clock=None):
         """Create a file storage
 
         :param str file_name: Path to store data file
@@ -180,6 +182,14 @@ class FileStorage(
            :interface:`packer <ZODB.FileStorage.interfaces.IFileStoragePacker>`.
         :param str blob_dir: A blob-directory path name.
            Blobs will be supported if this option is provided.
+        :param float historical_lease_timeout: Number of seconds a
+           historical read lease remains valid without renewal.  Leases
+           protect revisions needed by historical connections from
+           packing; the timeout ensures that a crashed process cannot
+           block cleanup forever.
+        :param callable historical_lease_clock: Callable returning the
+           current time in seconds, used for lease expiry.  Defaults to
+           ``time.time``.  Mainly useful for tests.
 
         A file storage stores data in a single file that behaves like
         a traditional transaction log. New data records are appended
@@ -260,6 +270,11 @@ class FileStorage(
         self.pack_keep_old = pack_keep_old
         if packer is not None:
             self.packer = packer
+
+        if historical_lease_clock is None:
+            historical_lease_clock = time.time
+        self.historical_lease_registry = HistoricalLeaseRegistry(
+            historical_lease_timeout, historical_lease_clock)
 
         BaseStorage.__init__(self, file_name)
 
@@ -1222,6 +1237,22 @@ class FileStorage(
         stop = TimeStamp(*time.gmtime(t)[:5] + (t % 60,)).raw()
         if stop == z64:
             raise FileStorageError('Invalid pack time')
+
+        # Historical read leases may require retaining revisions that
+        # would otherwise be packed away.  The registry is consulted
+        # exactly once, here, so that lease renewals and the start of
+        # the pack have a deterministic order.  The limit is shifted
+        # down by one because a historical connection reads revisions
+        # strictly below its ``before`` serial, while packing keeps the
+        # revisions current at or below the pack time.
+        lease_limit = self.historical_lease_registry.pack_retention_limit()
+        if lease_limit is not None and lease_limit > z64:
+            lease_stop = p64(u64(lease_limit) - 1)
+            if lease_stop < stop:
+                logger.info(
+                    "pack limited to %s by active historical lease(s)",
+                    TimeStamp(lease_stop))
+                stop = lease_stop
 
         # If the storage is empty, there's nothing to do.
         if not self._index:

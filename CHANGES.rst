@@ -5,6 +5,16 @@
 6.4 (unreleased)
 ----------------
 
+- Add historical read leases.  Historical connections now register a
+  lease recording their read lower bound when opened, so that
+  ``FileStorage.pack`` retains the revisions they still need.  Leases
+  expire after a configurable timeout
+  (``FileStorage(historical_lease_timeout=...)``) unless renewed with
+  ``Connection.renewHistoricalLease()``, are released when the
+  connection is closed, and reading through an expired lease raises
+  ``ZODB.POSException.HistoricalLeaseExpired`` instead of returning a
+  mix of revisions.
+
 
 6.3 (2026-04-14)
 ----------------

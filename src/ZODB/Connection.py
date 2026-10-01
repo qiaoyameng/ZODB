@@ -310,6 +310,13 @@ class Connection(ExportImport):
         # Drop transaction manager to release resources and help prevent errors
         self.transaction_manager = None
 
+        if self.before is not None:
+            # Release the historical read lease registered on open.
+            release_lease = getattr(self._normal_storage,
+                                    'release_lease', None)
+            if release_lease is not None:
+                release_lease()
+
         if hasattr(self._storage, 'afterCompletion'):
             self._storage.afterCompletion()
 
@@ -341,6 +348,24 @@ class Connection(ExportImport):
         if self.opened is None:
             raise ConnectionStateError("The database connection is closed")
         return self._storage.isReadOnly()
+
+    def renewHistoricalLease(self):
+        """Renew the retention lease of an historical connection.
+
+        Historical connections hold a lease that keeps packing from
+        collecting the revisions they read.  Leases expire after a
+        storage-defined timeout unless renewed, so that a crashed
+        process cannot block cleanup forever.  Raises
+        ``ZODB.POSException.HistoricalLeaseExpired`` if the lease has
+        already expired; the connection should then be closed.
+        """
+        if self.before is None:
+            raise ConnectionStateError("not an historical connection")
+        if self.opened is None:
+            raise ConnectionStateError("The database connection is closed")
+        renew_lease = getattr(self._normal_storage, 'renew_lease', None)
+        if renew_lease is not None:
+            renew_lease()
 
     @property
     def root(self):
@@ -888,6 +913,14 @@ class Connection(ExportImport):
                                              'explicit', False)
 
         self.opened = time.time()
+
+        if self.before is not None:
+            # Register the read lower bound of this historical
+            # connection, so packing retains the revisions it needs.
+            acquire_lease = getattr(self._normal_storage,
+                                    'acquire_lease', None)
+            if acquire_lease is not None:
+                acquire_lease()
 
         if self._reset_counter != global_reset_counter:
             # New code is in place.  Start a new cache.

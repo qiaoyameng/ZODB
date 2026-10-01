@@ -345,6 +345,15 @@ class ReadOnlyHistoryError(POSError):
     """Unable to add or modify objects in an historical connection."""
 
 
+class HistoricalLeaseExpired(POSError):
+    """The retention lease of an historical connection has expired.
+
+    The revisions the connection was reading may have been packed away.
+    Further reading is refused, because it could return a mix of
+    revisions.  The connection should be closed.
+    """
+
+
 class InvalidObjectReference(POSError):
     """An object contains an invalid reference to another object.
 

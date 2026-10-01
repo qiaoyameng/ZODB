@@ -284,6 +284,30 @@ you will get an error.
     ...
     ValueError: cannot open an historical connection in the future.
 
+Packing and historical read leases
+==================================
+
+Storages that pack (currently FileStorage) keep a registry of
+historical read leases.  When an historical connection is opened, it
+registers a lease recording its read lower bound (its ``before``
+serial), and the storage's pack computes its retention range so that
+revisions protected by active leases are kept.  The lease is released
+when the connection is closed.
+
+Because a crashed process must not block garbage collection forever,
+leases expire after a storage-defined timeout
+(``historical_lease_timeout``, 300 seconds by default for FileStorage)
+unless renewed explicitly::
+
+    conn.renewHistoricalLease()
+
+Lease renewal and the start of a pack are serialized, so their order
+is deterministic: a lease that is valid when a pack starts is honored
+by that pack.  Once a lease has expired, the connection can no longer
+be used: reading raises
+``ZODB.POSException.HistoricalLeaseExpired`` rather than returning a
+mix of revisions, and the connection should be closed.
+
 Warnings
 ========
 
