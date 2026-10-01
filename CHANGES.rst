@@ -5,6 +5,14 @@
 6.4 (unreleased)
 ----------------
 
+- Add transaction-level read-only mode (``ZODB.readonly``).
+  ``ZODB.readonly.set_read_only(transaction)`` marks a transaction
+  read-only for all ZODB connections joined to it: registering modified
+  objects, adding new objects and opening blobs for writing then raise
+  ``ZODB.POSException.ReadOnlyError`` immediately instead of failing at
+  commit time.  The restriction ends with the transaction and does not
+  affect other transactions.
+
 
 6.3 (2026-04-14)
 ----------------

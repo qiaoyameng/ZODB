@@ -36,6 +36,8 @@ from ZODB._compat import PersistentUnpickler
 from ZODB._compat import ascii_bytes
 from ZODB.interfaces import BlobError
 from ZODB.POSException import POSKeyError
+from ZODB.POSException import ReadOnlyError
+from ZODB.readonly import is_read_only
 
 
 logger = logging.getLogger('ZODB.blob')
@@ -176,6 +178,13 @@ class Blob(persistent.Persistent):
         else:
             if self.readers:
                 raise BlobError("Already opened for reading.")
+
+            jar = self._p_jar
+            if jar is not None:
+                tm = getattr(jar, 'transaction_manager', None)
+                if tm is not None and is_read_only(tm.get()):
+                    raise ReadOnlyError(
+                        "Changes are not allowed in a read-only transaction")
 
             if mode == 'w':
                 if self._p_blob_uncommitted is None:
