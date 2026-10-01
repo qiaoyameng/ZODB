@@ -5,6 +5,12 @@
 6.4 (unreleased)
 ----------------
 
+- Add ``ZODB.FileStorage.fsverify``, a read-only structural checker
+  for FileStorage data files.  It can run while the storage is in use,
+  verifies record lengths, transaction trailers, revision back
+  pointers and blob references transaction by transaction, and
+  supports resuming from a previously verified checkpoint.
+
 
 6.3 (2026-04-14)
 ----------------
