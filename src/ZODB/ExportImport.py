@@ -75,40 +75,54 @@ class ExportImport:
         return f
 
     def importFile(self, f, clue='', customImporters=None):
+        return self._importFile(f, clue, customImporters)[0]
+
+    def importFileWithOIDMap(self, f, clue='', customImporters=None):
+        """Import an export stream and return ``(root, oid_map)``.
+
+        ``oid_map`` maps each source OID (bytes) to the OID it received
+        in this database.
+        """
+        return self._importFile(f, clue, customImporters)
+
+    def _importFile(self, f, clue='', customImporters=None):
         # This is tricky, because we need to work in a transaction!
 
         if isinstance(f, str):
             with open(f, 'rb') as fp:
-                return self.importFile(fp, clue=clue,
-                                       customImporters=customImporters)
+                return self._importFile(fp, clue=clue,
+                                        customImporters=customImporters)
 
         magic = f.read(4)
         if magic != b'ZEXP':
             if customImporters and magic in customImporters:
                 f.seek(0)
-                return customImporters[magic](self, f, clue)
+                return customImporters[magic](self, f, clue), {}
             raise ExportError("Invalid export header")
 
         t = self.transaction_manager.get()
         if clue:
             t.note(clue)
 
-        return_oid_list = []
-        self._import = f, return_oid_list
+        import_state = []
+        oid_map = {}
+        self._import = f, import_state, oid_map
         self._register()
         t.savepoint(optimistic=True)
         # Return the root imported object.
-        if return_oid_list:
-            return self.get(return_oid_list[0])
+        if import_state:
+            root = self.get(import_state[0])
         else:
-            return None
+            root = None
+        return root, oid_map
 
-    def _importDuringCommit(self, transaction, f, return_oid_list):
+    def _importDuringCommit(self, transaction, f, import_state, oid_map=None):
         """Import data during two-phase commit.
 
         Invoked by the transaction manager mid commit.
         Appends one item, the OID of the first object created,
-        to return_oid_list.
+        to import_state.  If oid_map is a dict, it is filled with a
+        mapping of source OIDs to newly allocated OIDs.
         """
         oids = {}
 
@@ -136,6 +150,9 @@ class ExportImport:
                 else:
                     oid = self._storage.new_oid(), klass
                 oids[ooid] = oid
+                if oid_map is not None:
+                    new_oid = oid[0] if isinstance(oid, tuple) else oid
+                    oid_map[ooid] = new_oid
 
             return Ghost(oid)
 
@@ -160,7 +177,9 @@ class ExportImport:
                     oid = oid[0]
             else:
                 oids[ooid] = oid = self._storage.new_oid()
-                return_oid_list.append(oid)
+                import_state.append(oid)
+                if oid_map is not None and ooid not in oid_map:
+                    oid_map[ooid] = oid
 
             if (b'blob' in data and
                     isinstance(self._reader.getGhost(data), Blob)):

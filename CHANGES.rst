@@ -5,6 +5,19 @@
 6.4 (unreleased)
 ----------------
 
+- Add idempotent, batch-identified cross-database imports.
+  ``ZODB.BatchImport.import_batch`` imports an export stream once for a
+  given batch ID: the batch summary and the source-to-destination OID
+  mapping are committed together with the imported graph.  Repeating the
+  same batch ID returns the original mapping, reusing an ID with
+  different content raises ``BatchMismatchError``, failed or aborted
+  attempts leave no import marker, and concurrent imports converge
+  through storage conflicts rather than process-local state.
+
+- Add ``Connection.importFileWithOIDMap`` which behaves like
+  ``Connection.importFile`` but also returns the mapping of source OIDs
+  to newly allocated destination OIDs.
+
 
 6.3 (2026-04-14)
 ----------------
